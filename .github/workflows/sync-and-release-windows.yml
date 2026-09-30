@@ -1,0 +1,153 @@
+# .github/workflows/sync-and-release-windows.yml
+name: Sync upstream & release Windows desktop (zip)
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # 6시간마다 (UTC)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "같은 upstream 커밋의 릴리스가 이미 있어도 삭제 후 다시 빌드"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-and-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: NousResearch/hermes-agent
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      up_sha: ${{ steps.plan.outputs.up_sha }}
+      desc: ${{ steps.plan.outputs.desc }}
+      needs_build: ${{ steps.plan.outputs.needs_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # upstream 이 .github/workflows 를 바꾸면 GITHUB_TOKEN 으로는 push 불가
+          # → repo + workflow 권한의 PAT 를 SYNC_PAT 시크릿으로 등록
+          token: ${{ secrets.SYNC_PAT }}
+
+      - name: Merge upstream
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"   # 충돌 나면 여기서 실패
+          git push origin HEAD
+
+      - name: Decide whether a release is needed
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          up_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+          desc=$(git describe --tags --always "$up_sha")
+          tag="win-${up_sha:0:8}"
+          if [ "$FORCE" = "true" ]; then
+            need=true
+          elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            need=false
+          else
+            need=true
+          fi
+          {
+            echo "up_sha=$up_sha"
+            echo "desc=$desc"
+            echo "tag=$tag"
+            echo "needs_build=$need"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-release:
+    needs: sync
+    if: needs.sync.outputs.needs_build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      ZIP_NAME: Hermes-Desktop-win-x64-${{ needs.sync.outputs.tag }}.zip
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # fork 의 merge 커밋이 아니라 upstream 의 정확한 커밋을 빌드한다.
+      # (fork 전용 커밋은 upstream 에 없어서 첫 실행 시 런타임 설치가 실패할 수 있음)
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.up_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"   # 루트 engines: node >=22.22.0, npm <11.10.0 || >=11.17.0
+          cache: npm
+
+      - name: Show toolchain / engines
+        run: |
+          node -v
+          npm -v
+          node -e "console.log('engines:', JSON.stringify(require('./package.json').engines))"
+
+      # 루트 package.json 이 workspaces: ["apps/*"] 를 선언, lockfile 도 루트에 있음
+      - name: Install dependencies
+        run: npm ci
+
+      # pack = electron-builder --dir → apps/desktop/release/win-unpacked (서명·인스톨러 없음)
+      - name: Build unpacked app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm --prefix apps/desktop run pack
+
+      - name: Sanity-check build output
+        run: |
+          rel=apps/desktop/release
+          ls -la "$rel"
+          ls "$rel"/win-unpacked/*.exe >/dev/null \
+            || { echo "::error::win-unpacked 에 실행 파일이 없음"; exit 1; }
+          # 과거 이슈(#52764): app.asar 에 npm 의존성이 빠져 실행 시 크래시
+          asar="$rel/win-unpacked/resources/app.asar"
+          if [ -f "$asar" ] && grep -q '"simple-git"' apps/desktop/package.json; then
+            npx --yes @electron/asar list "$asar" | grep -E 'node_modules[\\/]simple-git[\\/]' >/dev/null \
+              || echo "::warning::simple-git 이 app.asar 에 없음 - 실행 시 Cannot find module 오류 가능 (이 zip 은 올리지 말 것)"
+          fi
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $rel = "apps/desktop/release"
+          Rename-Item "$rel/win-unpacked" "Hermes-Desktop"   # 압축 해제 시 깔끔한 폴더명
+          Compress-Archive -Path "$rel/Hermes-Desktop" -DestinationPath $env:ZIP_NAME -CompressionLevel Optimal -Force
+          $size = (Get-Item $env:ZIP_NAME).Length
+          Write-Host ("{0}: {1:N0} bytes" -f $env:ZIP_NAME, $size)
+          if ($size -ge 2GB) { throw "zip exceeds GitHub's 2 GiB release asset limit" }
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.sync.outputs.tag }}
+          UP_SHA: ${{ needs.sync.outputs.up_sha }}
+          DESC: ${{ needs.sync.outputs.desc }}
+        run: |
+          sum=$(sha256sum "$ZIP_NAME" | cut -d' ' -f1)
+          # force 재빌드 시 기존 릴리스/태그 제거
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+          fi
+          notes=$(printf 'Auto-built from %s@%s (%s).\n\nHermes-Desktop 폴더의 Hermes.exe 를 실행하세요. 서명되지 않은 빌드라 SmartScreen 경고가 뜰 수 있습니다. 에이전트 런타임은 첫 실행 때 설치됩니다.\n\nSHA256: %s\n' \
+            "$UPSTREAM_REPO" "${UP_SHA:0:8}" "$DESC" "$sum")
+          gh release create "$TAG" "$ZIP_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$UP_SHA" \
+            --title "Hermes Desktop (Windows) $DESC" \
+            --notes "$notes" \
+            --latest
