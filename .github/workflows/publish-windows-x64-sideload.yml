@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   build-and-publish:
-    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 900
     env:
@@ -110,7 +109,7 @@ jobs:
         id: artifact
         shell: pwsh
         run: |
-          node scripts/stage-msixbundle.mjs --commit $env:HERMES_BUILD_COMMIT --version $env:HERMES_PAYLOAD_VERSION --variant bundled --no-upload --arch x64
+          node scripts/stage-msixbundle.mjs --commit $env:HERMES_BUILD_COMMIT --version $env:HERMES_PAYLOAD_VERSION --variant bundled --no-upload --arch x64 --unsigned
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $bundles = @(Get-ChildItem "apps/desktop/release" -Filter "*-win.msixbundle" -File)
