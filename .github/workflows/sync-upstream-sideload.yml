@@ -240,8 +240,8 @@ jobs:
           & $sevenZip a -t7z -mx=0 -v1900m $archive $bundle.FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $parts = @(Get-ChildItem "$archive.*" -File | Sort-Object Name)
-          if ($parts.Count -lt 2) {
+          $parts = @(Get-ChildItem "$($archive).*" -File | Sort-Object Name)
+          if ($parts.Count -lt 1) {
             throw "Expected split 7-Zip volumes; found $($parts.Count)"
           }
           $checksums = foreach ($part in $parts) {
@@ -261,7 +261,7 @@ jobs:
           Write-Host "Split into $($parts.Count) volumes (1900 MiB maximum each)"
           Write-Host "Checksums: $checksumFile"
 
-      - name: Publish the single bundle asset
+      - name: Publish split bundle volumes
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.sync.outputs.tag }}
@@ -273,8 +273,6 @@ jobs:
           $notes = @"
           Windows x64 Sideload MSIXBundle only.
 
-          Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
-          Fork build source: $env:SOURCE_SHA
           Download every .7z.001, .7z.002, ... volume and SHA256SUMS.txt.
           Extract the archive by opening the .7z.001 volume with 7-Zip.
           Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
