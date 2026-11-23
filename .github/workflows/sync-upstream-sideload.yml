@@ -44,7 +44,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --prune upstream "${UPSTREAM_BRANCH}" --tags
+          git fetch --prune upstream "${UPSTREAM_BRANCH}"
 
           # Prefer upstream on overlapping source hunks. The fork-owned policy
           # script then reapplies the x64-only packaging delta and removes
@@ -70,7 +70,6 @@ jobs:
           upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
           source_sha=$(git rev-parse HEAD)
           version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          desc=$(git describe --tags --always "$upstream_sha")
           tag="sideload-win-x64-${upstream_sha:0:12}"
 
           if [ "$FORCE" = "true" ]; then
@@ -89,7 +88,7 @@ jobs:
             echo "needs_build=$need"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Upstream: $UPSTREAM_REPO@$upstream_sha ($desc)"
+          echo "Upstream: $UPSTREAM_REPO@$upstream_sha"
           echo "Fork build source: $source_sha"
           echo "Windows x64 sideload version: $version"
           echo "Build required: $need"
