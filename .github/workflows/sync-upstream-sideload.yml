@@ -25,6 +25,20 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Require manual dispatch from main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        shell: pwsh
+        run: |
+          throw "Run this workflow from the main branch after completing the upstream sync."
+
       - name: Record build metadata
         id: metadata
         shell: pwsh
@@ -40,14 +54,6 @@ jobs:
           Write-Host "Build source: $sourceSha"
           Write-Host "Version: $version"
           Write-Host "Release tag: $tag"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "26"
 
       - name: Set up the locked build toolchain
         uses: ./.github/actions/setup-pm
@@ -163,7 +169,7 @@ jobs:
           $notes = @"
           Windows x64 Sideload MSIXBundle only. This bundle is **unsigned**.
 
-          **MSIXBundle SHA-256:** `$env:BUNDLE_SHA256`
+          **MSIXBundle SHA-256:** $env:BUNDLE_SHA256
 
           Download every .7z.001, .7z.002, ... volume and SHA256SUMS.txt.
           Verify the downloaded volumes with SHA256SUMS.txt, then extract by opening the .7z.001 volume with 7-Zip.
