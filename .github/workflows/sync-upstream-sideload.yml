@@ -1,124 +1,45 @@
-name: Sync upstream and publish Windows x64 sideload bundle
+name: Build and publish Windows x64 sideload bundle
 
 on:
-  schedule:
-    - cron: "17 */6 * * *"
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Rebuild and replace this upstream revision's bundle"
-        type: boolean
-        default: false
 
 concurrency:
-  group: sync-upstream-sideload
+  group: windows-x64-sideload-release
   cancel-in-progress: false
 
 permissions:
   contents: write
 
-env:
-  UPSTREAM_REPO: NousResearch/hermes-agent
-  UPSTREAM_BRANCH: main
-
 jobs:
-  sync:
-    runs-on: ubuntu-latest
-    outputs:
-      source_sha: ${{ steps.plan.outputs.source_sha }}
-      upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
-      version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
-      needs_build: ${{ steps.plan.outputs.needs_build }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ secrets.SYNC_PAT }}
-
-      - name: Merge upstream and re-apply fork policy
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --prune upstream "${UPSTREAM_BRANCH}"
-
-          # Prefer upstream on overlapping source hunks. The fork-owned policy
-          # script then reapplies the x64-only packaging delta and removes
-          # upstream release publishers before anything is pushed.
-          git merge --no-edit -X theirs "upstream/${UPSTREAM_BRANCH}"
-          python .fork/upstream_policy.py
-
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            git add -A
-            git commit -m "chore(fork): re-apply x64 sideload policy after upstream sync"
-          fi
-
-          git push origin HEAD:main
-
-      - name: Plan the x64 release
-        id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
-          source_sha=$(git rev-parse HEAD)
-          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          tag="sideload-win-x64-${upstream_sha:0:12}"
-
-          if [ "$FORCE" = "true" ]; then
-            need=true
-          elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            need=false
-          else
-            need=true
-          fi
-
-          {
-            echo "upstream_sha=$upstream_sha"
-            echo "source_sha=$source_sha"
-            echo "version=$version"
-            echo "tag=$tag"
-            echo "needs_build=$need"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Upstream: $UPSTREAM_REPO@$upstream_sha"
-          echo "Fork build source: $source_sha"
-          echo "Windows x64 sideload version: $version"
-          echo "Build required: $need"
-
   build-and-publish:
-    needs: sync
-    if: needs.sync.outputs.needs_build == 'true'
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
-    environment: release-signing
     timeout-minutes: 900
-    permissions:
-      contents: write
-      id-token: write
     env:
-      HERMES_BUILD_COMMIT: ${{ needs.sync.outputs.source_sha }}
-      HERMES_PAYLOAD_VERSION: ${{ needs.sync.outputs.version }}
+      HERMES_BUILD_COMMIT: ${{ github.sha }}
       HERMES_DESKTOP_VARIANT: bundled
-      AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
-      AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
-      AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
-      AZURE_SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
-      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-      AZURE_TOKEN_CREDENTIALS: prod
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.sync.outputs.source_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Record build metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $version = python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sourceSha = (git rev-parse HEAD).Trim()
+          $tag = "sideload-win-x64-$($sourceSha.Substring(0, 12))"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "source_sha=$sourceSha" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "HERMES_PAYLOAD_VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "Build source: $sourceSha"
+          Write-Host "Version: $version"
+          Write-Host "Release tag: $tag"
 
       - uses: actions/setup-python@v5
         with:
@@ -128,46 +49,11 @@ jobs:
         with:
           node-version: "26"
 
-      - name: Require Azure Trusted Signing configuration
-        shell: pwsh
-        run: |
-          $required = @(
-            "AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT", "AZURE_SIGN_PROFILE",
-            "AZURE_SIGN_PUBLISHER", "AZURE_CLIENT_ID", "AZURE_TENANT_ID"
-          )
-          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
-          if ($missing.Count -gt 0) {
-            throw "Configure these variables in the release-signing environment: $($missing -join ', ')"
-          }
-
-      - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: Mint federated token for the signing dlib
-        shell: bash
-        run: |
-          set -euo pipefail
-          file="$RUNNER_TEMP/azure-federated-token"
-          mint() {
-            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
-              | jq -r .value > "$file.tmp"
-            mv -f "$file.tmp" "$file"
-          }
-          mint
-          ( while sleep 240; do mint || true; done ) &
-          echo "AZURE_FEDERATED_TOKEN_FILE=$file" >> "$GITHUB_ENV"
-
       - name: Set up the locked build toolchain
         uses: ./.github/actions/setup-pm
         with:
           toolchain: all
           archive-inputs: false
-          # Use the normal verified PM caches for repeat upstream builds.
 
       - name: Restore desktop dependency inputs
         id: build-cache
@@ -207,14 +93,15 @@ jobs:
           pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --ignore-scripts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build and sign the x64 MSIX package
+      - name: Build the unsigned x64 MSIX package
         shell: pwsh
         timeout-minutes: 900
         run: |
           python scripts/bundles/desktop.py --prepared (Join-Path $env:RUNNER_TEMP "desktop-job\prepared.json") --variant bundled
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Assemble and verify the x64-only sideload bundle
+      - name: Assemble, split, and hash the x64-only sideload bundle
+        id: artifact
         shell: pwsh
         run: |
           node scripts/stage-msixbundle.mjs --commit $env:HERMES_BUILD_COMMIT --version $env:HERMES_PAYLOAD_VERSION --variant bundled --no-upload --arch x64
@@ -225,10 +112,9 @@ jobs:
             throw "Expected exactly one x64 sideload .msixbundle; found $($bundles.Count)"
           }
           $bundle = $bundles[0]
-          # MSIXBundle payloads are already compressed. Store the bundle in
-          # uncompressed 7-Zip volumes so every GitHub Release asset stays
-          # comfortably below GitHub's 2 GiB per-asset limit.
-          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+
+          $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          $sevenZip = if ($sevenZipCommand) { $sevenZipCommand.Source } else { $null }
           if (-not $sevenZip) {
             choco install 7zip --yes --no-progress
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -236,17 +122,19 @@ jobs:
           }
           if (-not (Test-Path $sevenZip)) { throw "7-Zip executable not found" }
 
+          # MSIXBundle payloads are already compressed. Store without
+          # recompression and split into GitHub-safe 1900 MiB volumes.
           $archive = "$($bundle.FullName).7z"
           & $sevenZip a -t7z -mx=0 -v1900m $archive $bundle.FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $parts = @(Get-ChildItem "$($archive).*" -File | Sort-Object Name)
-          if ($parts.Count -lt 1) {
-            throw "Expected split 7-Zip volumes; found $($parts.Count)"
-          }
+          if ($parts.Count -lt 1) { throw "No split 7-Zip volumes were created" }
+
+          $bundleHash = (Get-FileHash -Algorithm SHA256 $bundle.FullName).Hash.ToLowerInvariant()
           $checksums = foreach ($part in $parts) {
             if ($part.Length -ge 2GB) {
-              throw "Split volume exceeds GitHub's 2 GiB per-release-asset limit: $($part.Name)"
+              throw "Split volume exceeds GitHub's 2 GiB per-asset limit: $($part.Name)"
             }
             $hash = (Get-FileHash -Algorithm SHA256 $part.FullName).Hash.ToLowerInvariant()
             "$hash  $($part.Name)"
@@ -254,30 +142,33 @@ jobs:
           $checksumFile = Join-Path $bundle.DirectoryName "SHA256SUMS.txt"
           $checksums | Set-Content -Encoding ascii $checksumFile
 
+          "bundle_sha256=$bundleHash" >> $env:GITHUB_OUTPUT
+          "part_count=$($parts.Count)" >> $env:GITHUB_OUTPUT
           "BUNDLE_ARCHIVE=$archive" >> $env:GITHUB_ENV
           "BUNDLE_DIR=$($bundle.DirectoryName)" >> $env:GITHUB_ENV
-          "BUNDLE_PART_COUNT=$($parts.Count)" >> $env:GITHUB_ENV
-          Write-Host "Bundle: $($bundle.Name)"
+          Write-Host "Unsigned bundle: $($bundle.Name)"
+          Write-Host "Bundle SHA-256: $bundleHash"
           Write-Host "Split into $($parts.Count) volumes (1900 MiB maximum each)"
-          Write-Host "Checksums: $checksumFile"
 
-      - name: Publish split bundle volumes
+      - name: Publish release assets and checksum
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ needs.sync.outputs.tag }}
-          SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
-          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
-          APP_VERSION: ${{ needs.sync.outputs.version }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          SOURCE_SHA: ${{ steps.metadata.outputs.source_sha }}
+          APP_VERSION: ${{ steps.metadata.outputs.version }}
+          BUNDLE_SHA256: ${{ steps.artifact.outputs.bundle_sha256 }}
+          PART_COUNT: ${{ steps.artifact.outputs.part_count }}
         run: |
           $title = "Hermes Desktop Windows x64 Sideload $env:APP_VERSION"
           $notes = @"
-          Windows x64 Sideload MSIXBundle only.
+          Windows x64 Sideload MSIXBundle only. This bundle is **unsigned**.
+
+          **MSIXBundle SHA-256:** `$env:BUNDLE_SHA256`
 
           Download every .7z.001, .7z.002, ... volume and SHA256SUMS.txt.
-          Extract the archive by opening the .7z.001 volume with 7-Zip.
-          Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
-          Fork build source: $env:SOURCE_SHA
-          Split volumes: $env:BUNDLE_PART_COUNT (1900 MiB max each)
+          Verify the downloaded volumes with SHA256SUMS.txt, then extract by opening the .7z.001 volume with 7-Zip.
+          Build source commit: $env:SOURCE_SHA
+          Split volumes: $env:PART_COUNT (1900 MiB max each)
           "@
 
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
@@ -286,8 +177,8 @@ jobs:
             gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            # This tag is dedicated to this artifact. Remove all prior assets,
-            # including obsolete volume numbers from a forced replacement.
+            # A rerun replaces only the assets attached to this exact
+            # commit-specific release; no other release or tag is touched.
             $oldAssets = @(gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name')
             foreach ($asset in $oldAssets) {
               gh release delete-asset $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --yes
