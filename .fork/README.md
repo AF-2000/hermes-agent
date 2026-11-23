@@ -54,6 +54,19 @@ the fork's post-sync commit, which includes the fork policy. A normal scheduled
 run skips a revision that already has a Release; manual dispatch with
 `force=true` rebuilds and replaces the bundle asset for that same revision.
 
-Each newly published Release contains exactly one asset: the Windows x64
-Sideload `.msixbundle`. No App Installer feed, certificate, ZIP, EXE, ARM64,
-or Store package is uploaded.
+Each newly published Release contains the Windows x64 Sideload MSIXBundle as
+uncompressed 7-Zip split volumes (`.7z.001`, `.7z.002`, ...), each capped at
+1900 MiB, plus `SHA256SUMS.txt`. The MSIXBundle is already compressed, so the
+7-Zip archive uses store mode (`-mx=0`) to avoid wasting CPU time and build
+time on ineffective recompression.
+
+Download every volume and the checksum file into the same directory. Verify
+the volumes against `SHA256SUMS.txt`, then open/extract the first volume
+(`.7z.001`) with 7-Zip; it reconstructs the original `.msixbundle`, which
+can then be installed using the normal Windows sideload procedure. Do not try
+to install an individual volume.
+
+A forced rebuild removes all assets from that revision's dedicated Release
+before uploading the new volume set, preventing stale extra volumes from
+remaining if the rebuilt bundle is smaller. No App Installer feed, certificate,
+standalone ZIP, EXE, ARM64, or Store package is uploaded.
