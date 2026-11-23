@@ -97,7 +97,7 @@ def enforce_x64_bundle() -> bool:
         changed = True
 
     if changed:
-        path.write_text(source, encoding="utf-8", newline="\\n")
+        path.write_text(source, encoding="utf-8", newline="\n")
     return changed
 
 
