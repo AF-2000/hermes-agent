@@ -180,6 +180,7 @@ jobs:
           producer: desktop
 
       - name: Prepare the bundled desktop payload
+        id: prepare
         shell: pwsh
         run: |
           $work = Join-Path $env:RUNNER_TEMP "desktop-job"
