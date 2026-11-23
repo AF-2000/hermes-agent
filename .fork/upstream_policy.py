@@ -115,7 +115,10 @@ def validate_fork_workflow() -> None:
         "python .fork/upstream_policy.py",
         "scripts/stage-msixbundle.mjs",
         "--arch x64",
+        "-v1900m",
+        "SHA256SUMS.txt",
         "gh release create",
+        "gh release upload",
     )
     missing = [marker for marker in required if marker not in source]
     if missing:
