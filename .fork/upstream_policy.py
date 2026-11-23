@@ -38,12 +38,11 @@ BUNDLE_PATTERN = re.compile(
     re.S,
 )
 
-BUNDLE_AFTER = r"""const arch = values.arch || 'universal'
-if (!['universal', 'x64'].includes(arch)) {
-  throw new Error('--arch must be universal or x64; received ' + arch)
+BUNDLE_AFTER = r"""const arch = values.arch || 'x64'
+if (arch !== 'x64') {
+  throw new Error('--arch must be x64 in this fork; received ' + arch)
 }
-const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']
-const packages = bundleArchs.map(msixFile)
+const packages = [msixFile('x64')]
 const bundle = bundleFile()
 const missing = packages.filter(file => !fs.existsSync(file))
 if (missing.length) {
@@ -89,7 +88,7 @@ def enforce_x64_bundle() -> bool:
         source = source.replace(ARGUMENTS_BEFORE, ARGUMENTS_AFTER, 1)
         changed = True
 
-    marker = "const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']"
+    marker = "const packages = [msixFile('x64')]"
     if marker not in source:
         matches = list(BUNDLE_PATTERN.finditer(source))
         if len(matches) != 1:
