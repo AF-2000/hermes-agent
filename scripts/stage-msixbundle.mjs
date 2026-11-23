@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Native Windows adapter: bundle x64 + arm64 MSIX packages and sign the
+// Native Windows adapter: bundle the selected MSIX architecture (x64 only in this fork) and sign the
 // envelope. Every mode stops at the artifact; CI stages it for native smoke
 // before the separate release Python publisher can write an App Installer feed.
 // Usage: node scripts/stage-msixbundle.mjs --tag vX.Y.Z --candidate
@@ -105,12 +105,11 @@ const signing = Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIG
 const { makeappx, signtool, dlib, dotnetRoot } = await ensureWindowsBundleTools({ signing })
 
 // ── 1. bundle ──────────────────────────────────────────────────────────────
-const arch = values.arch || 'universal'
-if (!['universal', 'x64'].includes(arch)) {
-  throw new Error(`--arch must be 'universal' or 'x64', got '${arch}'`)
+const arch = values.arch || 'x64'
+if (arch !== 'x64') {
+  throw new Error('--arch must be x64 in this fork; received ' + arch)
 }
-const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']
-const packages = bundleArchs.map(msixFile)
+const packages = [msixFile('x64')]
 const bundle = bundleFile()
 const missing = packages.filter(file => !fs.existsSync(file))
 if (missing.length) {
