@@ -18,7 +18,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 
 const { values } = parseArgs({ options: {
   tag: { type: 'string' }, commit: { type: 'string' }, version: { type: 'string' },
-  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
+  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, unsigned: { type: 'boolean' }, candidate: { type: 'boolean' },
   'channel-request': { type: 'string' },
 } })
 const channelRequest = values['channel-request']
@@ -101,7 +101,7 @@ function bundleFile() {
   return path.join(releaseDir, `${name}-${version}-win.msixbundle`)
 }
 
-const signing = Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIGN_ACCOUNT && process.env.AZURE_SIGN_PROFILE)
+const signing = values.unsigned !== true && Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIGN_ACCOUNT && process.env.AZURE_SIGN_PROFILE)
 const { makeappx, signtool, dlib, dotnetRoot } = await ensureWindowsBundleTools({ signing })
 
 // ── 1. bundle ──────────────────────────────────────────────────────────────
