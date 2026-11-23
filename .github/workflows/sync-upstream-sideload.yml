@@ -1,0 +1,242 @@
+name: Sync upstream and publish Windows x64 sideload bundle
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and replace this upstream revision's bundle"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-upstream-sideload
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: NousResearch/hermes-agent
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: \${{ steps.plan.outputs.source_sha }}
+      upstream_sha: \${{ steps.plan.outputs.upstream_sha }}
+      version: \${{ steps.plan.outputs.version }}
+      tag: \${{ steps.plan.outputs.tag }}
+      needs_build: \${{ steps.plan.outputs.needs_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: \${{ secrets.SYNC_PAT }}
+
+      - name: Merge upstream and re-apply fork policy
+        env:
+          GH_TOKEN: \${{ secrets.SYNC_PAT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/\${UPSTREAM_REPO}.git"
+          git fetch --prune upstream "\${UPSTREAM_BRANCH}" --tags
+
+          # Prefer upstream on overlapping source hunks. The fork-owned policy
+          # script then reapplies the x64-only packaging delta and removes
+          # upstream release publishers before anything is pushed.
+          git merge --no-edit -X theirs "upstream/\${UPSTREAM_BRANCH}"
+          python .fork/upstream_policy.py
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git add -A
+            git commit -m "chore(fork): re-apply x64 sideload policy after upstream sync"
+          fi
+
+          git push origin HEAD:main
+
+      - name: Plan the x64 release
+        id: plan
+        env:
+          GH_TOKEN: \${{ github.token }}
+          FORCE: \${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha=$(git rev-parse "upstream/\${UPSTREAM_BRANCH}")
+          source_sha=$(git rev-parse HEAD)
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          desc=$(git describe --tags --always "$upstream_sha")
+          tag="sideload-win-x64-\${upstream_sha:0:12}"
+
+          if [ "$FORCE" = "true" ]; then
+            need=true
+          elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            need=false
+          else
+            need=true
+          fi
+
+          {
+            echo "upstream_sha=$upstream_sha"
+            echo "source_sha=$source_sha"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "needs_build=$need"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Upstream: $UPSTREAM_REPO@$upstream_sha ($desc)"
+          echo "Fork build source: $source_sha"
+          echo "Windows x64 sideload version: $version"
+          echo "Build required: $need"
+
+  build-and-publish:
+    needs: sync
+    if: needs.sync.outputs.needs_build == 'true'
+    runs-on: windows-latest
+    environment: release-signing
+    timeout-minutes: 900
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      HERMES_BUILD_COMMIT: \${{ needs.sync.outputs.source_sha }}
+      HERMES_PAYLOAD_VERSION: \${{ needs.sync.outputs.version }}
+      HERMES_DESKTOP_VARIANT: bundled
+      AZURE_SIGN_ENDPOINT: \${{ vars.AZURE_SIGN_ENDPOINT }}
+      AZURE_SIGN_ACCOUNT: \${{ vars.AZURE_SIGN_ACCOUNT }}
+      AZURE_SIGN_PROFILE: \${{ vars.AZURE_SIGN_PROFILE }}
+      AZURE_SIGN_PUBLISHER: \${{ vars.AZURE_SIGN_PUBLISHER }}
+      AZURE_CLIENT_ID: \${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: \${{ vars.AZURE_TENANT_ID }}
+      AZURE_TOKEN_CREDENTIALS: prod
+      GH_TOKEN: \${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ needs.sync.outputs.source_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Require Azure Trusted Signing configuration
+        shell: pwsh
+        run: |
+          $required = @(
+            "AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT", "AZURE_SIGN_PROFILE",
+            "AZURE_SIGN_PUBLISHER", "AZURE_CLIENT_ID", "AZURE_TENANT_ID"
+          )
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) {
+            throw "Configure these variables in the release-signing environment: $($missing -join ', ')"
+          }
+
+      - name: Azure login (OIDC)
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Mint federated token for the signing dlib
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/azure-federated-token"
+          mint() {
+            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+              | jq -r .value > "$file.tmp"
+            mv -f "$file.tmp" "$file"
+          }
+          mint
+          ( while sleep 240; do mint || true; done ) &
+          echo "AZURE_FEDERATED_TOKEN_FILE=$file" >> "$GITHUB_ENV"
+
+      - name: Set up the locked build toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          archive-inputs: false
+          cache-python: false
+          save-tools-cache: false
+          cache-node: false
+
+      - name: Prepare the bundled desktop payload
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "desktop-job"
+          $cache = Join-Path $env:GITHUB_WORKSPACE ".cache\desktop-inputs"
+          python scripts/bundles/desktop.py --commit $env:HERMES_BUILD_COMMIT --variant bundled --prepare-only --work $work --cache $cache
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m scripts.ci.desktop_commands (Join-Path $work "prepared.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install locked Windows bundle tooling
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and sign the x64 MSIX package
+        shell: pwsh
+        timeout-minutes: 900
+        run: |
+          python scripts/bundles/desktop.py --prepared (Join-Path $env:RUNNER_TEMP "desktop-job\prepared.json") --variant bundled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assemble and verify the x64-only sideload bundle
+        shell: pwsh
+        run: |
+          node scripts/stage-msixbundle.mjs --commit $env:HERMES_BUILD_COMMIT --version $env:HERMES_PAYLOAD_VERSION --variant bundled --no-upload --arch x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $bundles = @(Get-ChildItem "apps/desktop/release" -Filter "*-win.msixbundle" -File)
+          if ($bundles.Count -ne 1) {
+            throw "Expected exactly one x64 sideload .msixbundle; found $($bundles.Count)"
+          }
+          $bundle = $bundles[0]
+          $hash = (Get-FileHash -Algorithm SHA256 $bundle.FullName).Hash.ToLowerInvariant()
+          "BUNDLE_PATH=$($bundle.FullName)" >> $env:GITHUB_ENV
+          "BUNDLE_SHA256=$hash" >> $env:GITHUB_ENV
+          Write-Host "Bundle: $($bundle.Name)"
+          Write-Host "SHA256: $hash"
+
+      - name: Publish the single bundle asset
+        shell: pwsh
+        env:
+          RELEASE_TAG: \${{ needs.sync.outputs.tag }}
+          SOURCE_SHA: \${{ needs.sync.outputs.source_sha }}
+          UPSTREAM_SHA: \${{ needs.sync.outputs.upstream_sha }}
+          APP_VERSION: \${{ needs.sync.outputs.version }}
+        run: |
+          $title = "Hermes Desktop Windows x64 Sideload $env:APP_VERSION"
+          $notes = @"
+          Windows x64 Sideload MSIXBundle only.
+
+          Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
+          Fork build source: $env:SOURCE_SHA
+          SHA256: $env:BUNDLE_SHA256
+          "@
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $env:BUNDLE_PATH --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --latest
+          } else {
+            gh release create $env:RELEASE_TAG $env:BUNDLE_PATH --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --latest
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
