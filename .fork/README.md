@@ -8,30 +8,29 @@ ZIP, or EXE release assets.
 
 1. When an upstream update is wanted, use GitHub's **Sync fork** control to
    merge `NousResearch/hermes-agent:main` into this fork's `main`.
-2. Review the sync result. If upstream has reintroduced or added any other
-   release-publishing workflow under `.github/workflows`, disable or delete
-   it manually before building. The build preflight detects competing
-   publishers and fails closed if any remain.
-3. Open **Actions → Build and publish Windows x64 sideload bundle** and run
-   it manually against the `main` branch.
-4. Before building, the Action runs `.fork/upstream_policy.py`. It restores
+2. Review the sync result, then open
+   **Actions → Build and publish Windows x64 sideload bundle** and run it
+   manually against the `main` branch.
+3. Before building, the Action runs `.fork/upstream_policy.py`. It restores
    the x64-only and explicit unsigned MSIX bundle mode. If upstream changed
    the MSIX assembly implementation beyond the known patch, the script fails
    closed rather than silently creating an incorrect bundle.
-5. If the packaging policy needed repair, the Action commits that source-code
+4. If the packaging policy needed repair, the Action commits that source-code
    change to `main`, then builds the resulting fork commit. It does not fetch,
    merge, or sync upstream itself.
+
+The preflight deliberately does not scan unrelated workflow files for
+release-related names or helper-module references. Upstream smoke/test
+workflows may use `scripts.releases.*` without publishing a GitHub Release,
+and disabling a workflow does not remove its YAML file. The publishing
+workflow is manually dispatched and uses a commit-specific tag; its own
+concurrency group serializes its runs. No historical Release or tag is
+deleted or modified.
 
 No scheduled sync, automatic release, personal access token, Azure Trusted
 Signing configuration, or GitHub Actions OIDC permission is required. The
 workflow uses the built-in `GITHUB_TOKEN` with `contents: write` to commit
 the packaging-policy repair and publish the Release.
-
-The workflow deliberately does not delete files under `.github/workflows`.
-GitHub does not grant `GITHUB_TOKEN` the separate Workflows permission
-needed to change those files. Therefore, if upstream adds or reintroduces a
-release workflow, disable or delete it manually before dispatching this build.
-This keeps `SYNC_PAT` unnecessary.
 
 ## Artifact and integrity
 
