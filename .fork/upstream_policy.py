@@ -12,15 +12,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-KEEP_WORKFLOWS = {"publish-windows-x64-sideload.yml"}
-
-PUBLISH_MARKERS = (
-    re.compile(r"\bgh\s+release\s+(?:create|upload|delete)\b", re.I),
-    re.compile(r"softprops/action-gh-release", re.I),
-    re.compile(r"actions/create-release", re.I),
-    re.compile(r"scripts\.releases\.(?:sequencer|stable|channel_publish)", re.I),
-    re.compile(r"desktop-bundled-release\.yml", re.I),
-)
 
 ARGUMENTS_BEFORE = """  variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
 """
@@ -60,18 +51,6 @@ for (const file of packages) {
   fs.copyFileSync(file, path.join(bundleStaging, path.basename(file)))
 }
 """
-
-def find_competing_release_workflows() -> list[str]:
-    competing: list[str] = []
-    for path in sorted(WORKFLOWS.glob("*.y*ml")):
-        if path.name in KEEP_WORKFLOWS:
-            continue
-        content = path.read_text(encoding="utf-8")
-        named_release_workflow = "release" in path.stem.lower()
-        publishes_release = any(pattern.search(content) for pattern in PUBLISH_MARKERS)
-        if named_release_workflow or publishes_release:
-            competing.append(path.relative_to(ROOT).as_posix())
-    return competing
 
 
 def enforce_x64_bundle() -> bool:
@@ -118,7 +97,7 @@ def enforce_x64_bundle() -> bool:
         changed = True
 
     if changed:
-        path.write_text(source, encoding="utf-8", newline="\n")
+        path.write_text(source, encoding="utf-8", newline="\\n")
     return changed
 
 
@@ -147,13 +126,11 @@ def validate_release_workflow() -> None:
 
 def main() -> None:
     validate_release_workflow()
-    competing = find_competing_release_workflows()
-    if competing:
-        raise RuntimeError(
-            "Upstream release-publishing workflows were found. Disable or delete "
-            "these workflows manually before dispatching this build: "
-            + ", ".join(competing)
-        )
+    # Do not scan other workflow files for "release" markers here. Upstream
+    # smoke/test workflows legitimately call scripts.releases.* without
+    # publishing a GitHub Release, and disabled workflow files remain on disk.
+    # This manual workflow publishes a commit-specific tag; its own concurrency
+    # group serializes reruns. Historical releases/tags are never cleaned up.
     patched = enforce_x64_bundle()
     print("enforced x64-only unsigned MSIX bundle mode" if patched else
           "x64-only unsigned MSIX bundle mode already present")
