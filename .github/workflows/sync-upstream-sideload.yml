@@ -225,14 +225,41 @@ jobs:
             throw "Expected exactly one x64 sideload .msixbundle; found $($bundles.Count)"
           }
           $bundle = $bundles[0]
-          if ($bundle.Length -ge 2GB) {
-            throw "Bundle exceeds GitHub's 2 GiB per-release-asset limit"
+          # MSIXBundle payloads are already compressed. Store the bundle in
+          # uncompressed 7-Zip volumes so every GitHub Release asset stays
+          # comfortably below GitHub's 2 GiB per-asset limit.
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) {
+            choco install 7zip --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
           }
-          $hash = (Get-FileHash -Algorithm SHA256 $bundle.FullName).Hash.ToLowerInvariant()
-          "BUNDLE_PATH=$($bundle.FullName)" >> $env:GITHUB_ENV
-          "BUNDLE_SHA256=$hash" >> $env:GITHUB_ENV
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip executable not found" }
+
+          $archive = "$($bundle.FullName).7z"
+          & $sevenZip a -t7z -mx=0 -v1900m $archive $bundle.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $parts = @(Get-ChildItem "$archive.*" -File | Sort-Object Name)
+          if ($parts.Count -lt 2) {
+            throw "Expected split 7-Zip volumes; found $($parts.Count)"
+          }
+          $checksums = foreach ($part in $parts) {
+            if ($part.Length -ge 2GB) {
+              throw "Split volume exceeds GitHub's 2 GiB per-release-asset limit: $($part.Name)"
+            }
+            $hash = (Get-FileHash -Algorithm SHA256 $part.FullName).Hash.ToLowerInvariant()
+            "$hash  $($part.Name)"
+          }
+          $checksumFile = Join-Path $bundle.DirectoryName "SHA256SUMS.txt"
+          $checksums | Set-Content -Encoding ascii $checksumFile
+
+          "BUNDLE_ARCHIVE=$archive" >> $env:GITHUB_ENV
+          "BUNDLE_DIR=$($bundle.DirectoryName)" >> $env:GITHUB_ENV
+          "BUNDLE_PART_COUNT=$($parts.Count)" >> $env:GITHUB_ENV
           Write-Host "Bundle: $($bundle.Name)"
-          Write-Host "SHA256: $hash"
+          Write-Host "Split into $($parts.Count) volumes (1900 MiB maximum each)"
+          Write-Host "Checksums: $checksumFile"
 
       - name: Publish the single bundle asset
         shell: pwsh
@@ -248,15 +275,33 @@ jobs:
 
           Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
           Fork build source: $env:SOURCE_SHA
-          SHA256: $env:BUNDLE_SHA256
+          Download every .7z.001, .7z.002, ... volume and SHA256SUMS.txt.
+          Extract the archive by opening the .7z.001 volume with 7-Zip.
+          Upstream: $env:UPSTREAM_REPO@$env:UPSTREAM_SHA
+          Fork build source: $env:SOURCE_SHA
+          Split volumes: $env:BUNDLE_PART_COUNT (1900 MiB max each)
           "@
 
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG $env:BUNDLE_PATH --repo $env:GITHUB_REPOSITORY --clobber
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          if (-not $releaseExists) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --latest
           } else {
-            gh release create $env:RELEASE_TAG $env:BUNDLE_PATH --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --latest
+            # This tag is dedicated to this artifact. Remove all prior assets,
+            # including obsolete volume numbers from a forced replacement.
+            $oldAssets = @(gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name')
+            foreach ($asset in $oldAssets) {
+              gh release delete-asset $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --yes
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
           }
+
+          $parts = @(Get-ChildItem "$env:BUNDLE_ARCHIVE.*" -File | Sort-Object Name)
+          $checksumFile = Join-Path $env:BUNDLE_DIR "SHA256SUMS.txt"
+          $assets = @($parts | ForEach-Object { $_.FullName }) + @($checksumFile)
+          gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
