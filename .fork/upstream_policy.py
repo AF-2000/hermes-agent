@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Re-apply fork-only Windows x64 sideload policy after every upstream merge.
 
-This script deliberately fails closed if upstream changes the MSIX bundler
-around the patch point. The sync workflow must not push a merge that silently
-restores the universal x64+ARM64 bundle requirement.
+Fail closed if upstream changes the MSIX bundler around the patch point. The
+sync workflow must not push a merge that silently restores ARM64 packaging.
 """
 from __future__ import annotations
 
@@ -22,40 +21,33 @@ PUBLISH_MARKERS = (
     re.compile(r"desktop-bundled-release\.yml", re.I),
 )
 
-ARGUMENTS_BEFORE = """  variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
+ARGUMENTS_BEFORE = r"""  variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
 """
-ARGUMENTS_AFTER = """  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
-"""
-
-BUNDLE_BEFORE = """const x64 = msixFile('x64')
-const arm64 = msixFile('arm64')
-const bundle = bundleFile()
-if (!fs.existsSync(x64) || !fs.existsSync(arm64)) {
-  console.error(\`[stage-msixbundle] need both per-arch msix to bundle:\\n  \${x64}\\n  \${arm64}\`)
-  process.exit(1)
-}
-
-// makeappx bundle /d includes EVERY .msix in the dir — the Store-submission
-// packages (Store-*.msix, same release dir after the legs merged their
-// artifacts) must never ride inside the out-of-store bundle. Stage only the
-// two per-arch packages into a clean dir before bundling.
-const bundleStaging = path.join(releaseDir, '__bundle-staging')
-fs.rmSync(bundleStaging, { recursive: true, force: true })
-fs.mkdirSync(bundleStaging, { recursive: true })
-fs.copyFileSync(x64, path.join(bundleStaging, path.basename(x64)))
-fs.copyFileSync(arm64, path.join(bundleStaging, path.basename(arm64)))
+ARGUMENTS_AFTER = r"""  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
 """
 
-BUNDLE_AFTER = """const arch = values.arch || 'universal'
+BUNDLE_PATTERN = re.compile(
+    r"const x64 = msixFile\('x64'\)\n"
+    r"const arm64 = msixFile\('arm64'\)\n"
+    r"const bundle = bundleFile\(\)\n"
+    r"if \(!fs\.existsSync\(x64\) \|\| !fs\.existsSync\(arm64\)\) \{\n"
+    r".*?\n"
+    r"\}\n\n"
+    r"// makeappx bundle /d includes EVERY \.msix in the dir.*?\n"
+    r"fs\.copyFileSync\(arm64, path\.join\(bundleStaging, path\.basename\(arm64\)\)\)\n",
+    re.S,
+)
+
+BUNDLE_AFTER = r"""const arch = values.arch || 'universal'
 if (!['universal', 'x64'].includes(arch)) {
-  throw new Error(\`--arch must be 'universal' or 'x64', got '\${arch}'\`)
+  throw new Error('--arch must be universal or x64; received ' + arch)
 }
 const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']
 const packages = bundleArchs.map(msixFile)
 const bundle = bundleFile()
 const missing = packages.filter(file => !fs.existsSync(file))
 if (missing.length) {
-  console.error(\`[stage-msixbundle] missing package(s) for \${arch} bundle:\\n  \${missing.join('\\n  ')}\`)
+  console.error('[stage-msixbundle] missing package(s) for ' + arch + ' bundle:\n  ' + missing.join('\n  '))
   process.exit(1)
 }
 
@@ -97,13 +89,15 @@ def enforce_x64_bundle() -> bool:
         source = source.replace(ARGUMENTS_BEFORE, ARGUMENTS_AFTER, 1)
         changed = True
 
-    if "const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']" not in source:
-        if source.count(BUNDLE_BEFORE) != 1:
+    marker = "const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']"
+    if marker not in source:
+        matches = list(BUNDLE_PATTERN.finditer(source))
+        if len(matches) != 1:
             raise RuntimeError(
                 "Upstream changed the MSIX bundle assembly block; "
                 "refusing to sync until the x64 policy patch is reviewed."
             )
-        source = source.replace(BUNDLE_BEFORE, BUNDLE_AFTER, 1)
+        source = BUNDLE_PATTERN.sub(lambda _: BUNDLE_AFTER, source, count=1)
         changed = True
 
     if changed:
