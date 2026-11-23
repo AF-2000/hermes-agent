@@ -105,7 +105,29 @@ def enforce_x64_bundle() -> bool:
     return changed
 
 
+
+def validate_fork_workflow() -> None:
+    path = WORKFLOWS / "sync-upstream-sideload.yml"
+    if not path.is_file():
+        raise RuntimeError("Fork-owned sync workflow is missing; refusing to push the upstream merge.")
+    source = path.read_text(encoding="utf-8")
+    required = (
+        "name: Sync upstream and publish Windows x64 sideload bundle",
+        "python .fork/upstream_policy.py",
+        "scripts/stage-msixbundle.mjs",
+        "--arch x64",
+        "gh release create",
+    )
+    missing = [marker for marker in required if marker not in source]
+    if missing:
+        raise RuntimeError(
+            "The fork-owned sync workflow was changed or replaced upstream; "
+            "refusing to push until it is restored: " + ", ".join(missing)
+        )
+
+
 def main() -> None:
+    validate_fork_workflow()
     removed = prune_release_workflows()
     patched = enforce_x64_bundle()
     for item in removed:
