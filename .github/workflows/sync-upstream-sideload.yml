@@ -297,7 +297,7 @@ jobs:
             }
           }
 
-          $parts = @(Get-ChildItem "$env:BUNDLE_ARCHIVE.*" -File | Sort-Object Name)
+          $parts = @(Get-ChildItem "$($env:BUNDLE_ARCHIVE).*" -File | Sort-Object Name)
           $checksumFile = Join-Path $env:BUNDLE_DIR "SHA256SUMS.txt"
           $assets = @($parts | ForEach-Object { $_.FullName }) + @($checksumFile)
           gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY
