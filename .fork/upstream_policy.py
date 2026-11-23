@@ -61,8 +61,8 @@ for (const file of packages) {
 }
 """
 
-def prune_release_workflows() -> list[str]:
-    removed: list[str] = []
+def find_competing_release_workflows() -> list[str]:
+    competing: list[str] = []
     for path in sorted(WORKFLOWS.glob("*.y*ml")):
         if path.name in KEEP_WORKFLOWS:
             continue
@@ -70,9 +70,8 @@ def prune_release_workflows() -> list[str]:
         named_release_workflow = "release" in path.stem.lower()
         publishes_release = any(pattern.search(content) for pattern in PUBLISH_MARKERS)
         if named_release_workflow or publishes_release:
-            path.unlink()
-            removed.append(path.relative_to(ROOT).as_posix())
-    return removed
+            competing.append(path.relative_to(ROOT).as_posix())
+    return competing
 
 
 def enforce_x64_bundle() -> bool:
@@ -148,10 +147,14 @@ def validate_release_workflow() -> None:
 
 def main() -> None:
     validate_release_workflow()
-    removed = prune_release_workflows()
+    competing = find_competing_release_workflows()
+    if competing:
+        raise RuntimeError(
+            "Upstream release-publishing workflows were found. Disable or delete "
+            "these workflows manually before dispatching this build: "
+            + ", ".join(competing)
+        )
     patched = enforce_x64_bundle()
-    for item in removed:
-        print(f"removed upstream release workflow: {item}")
     print("enforced x64-only unsigned MSIX bundle mode" if patched else
           "x64-only unsigned MSIX bundle mode already present")
 
