@@ -106,12 +106,6 @@ jobs:
           producer: desktop
           key: ${{ steps.build-cache.outputs.cache-key }}
 
-      - name: Install locked Windows bundle tooling
-        shell: pwsh
-        run: |
-          pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
       - name: Build the unsigned x64 MSIX package
         shell: pwsh
         timeout-minutes: 900
