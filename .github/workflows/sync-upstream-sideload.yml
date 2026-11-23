@@ -167,9 +167,17 @@ jobs:
         with:
           toolchain: all
           archive-inputs: false
-          cache-python: false
-          save-tools-cache: false
-          cache-node: false
+          # Use the normal verified PM caches for repeat upstream builds.
+
+      - name: Restore desktop dependency inputs
+        id: build-cache
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: restore
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
 
       - name: Prepare the bundled desktop payload
         shell: pwsh
@@ -180,6 +188,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m scripts.ci.desktop_commands (Join-Path $work "prepared.json")
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save dependency inputs before building
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: save
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+          key: ${{ steps.build-cache.outputs.cache-key }}
 
       - name: Install locked Windows bundle tooling
         shell: pwsh
@@ -205,6 +224,9 @@ jobs:
             throw "Expected exactly one x64 sideload .msixbundle; found $($bundles.Count)"
           }
           $bundle = $bundles[0]
+          if ($bundle.Length -ge 2GB) {
+            throw "Bundle exceeds GitHub's 2 GiB per-release-asset limit"
+          }
           $hash = (Get-FileHash -Algorithm SHA256 $bundle.FullName).Hash.ToLowerInvariant()
           "BUNDLE_PATH=$($bundle.FullName)" >> $env:GITHUB_ENV
           "BUNDLE_SHA256=$hash" >> $env:GITHUB_ENV
