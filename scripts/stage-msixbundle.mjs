@@ -18,7 +18,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 
 const { values } = parseArgs({ options: {
   tag: { type: 'string' }, commit: { type: 'string' }, version: { type: 'string' },
-  variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
+  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
   'channel-request': { type: 'string' },
 } })
 const channelRequest = values['channel-request']
@@ -105,23 +105,27 @@ const signing = Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIG
 const { makeappx, signtool, dlib, dotnetRoot } = await ensureWindowsBundleTools({ signing })
 
 // ── 1. bundle ──────────────────────────────────────────────────────────────
-const x64 = msixFile('x64')
-const arm64 = msixFile('arm64')
+const arch = values.arch || 'universal'
+if (!['universal', 'x64'].includes(arch)) {
+  throw new Error(`--arch must be 'universal' or 'x64', got '${arch}'`)
+}
+const bundleArchs = arch === 'x64' ? ['x64'] : ['x64', 'arm64']
+const packages = bundleArchs.map(msixFile)
 const bundle = bundleFile()
-if (!fs.existsSync(x64) || !fs.existsSync(arm64)) {
-  console.error(`[stage-msixbundle] need both per-arch msix to bundle:\n  ${x64}\n  ${arm64}`)
+const missing = packages.filter(file => !fs.existsSync(file))
+if (missing.length) {
+  console.error(`[stage-msixbundle] missing package(s) for ${arch} bundle:\n  ${missing.join('\n  ')}`)
   process.exit(1)
 }
 
-// makeappx bundle /d includes EVERY .msix in the dir — the Store-submission
-// packages (Store-*.msix, same release dir after the legs merged their
-// artifacts) must never ride inside the out-of-store bundle. Stage only the
-// two per-arch packages into a clean dir before bundling.
+// Stage only the selected architecture packages. This prevents ARM64 or
+// Store packages from entering the fork's x64-only sideload bundle.
 const bundleStaging = path.join(releaseDir, '__bundle-staging')
 fs.rmSync(bundleStaging, { recursive: true, force: true })
 fs.mkdirSync(bundleStaging, { recursive: true })
-fs.copyFileSync(x64, path.join(bundleStaging, path.basename(x64)))
-fs.copyFileSync(arm64, path.join(bundleStaging, path.basename(arm64)))
+for (const file of packages) {
+  fs.copyFileSync(file, path.join(bundleStaging, path.basename(file)))
+}
 
 if (fs.existsSync(bundle)) fs.rmSync(bundle, { force: true })
 execFileSync(makeappx, ['bundle', '/o', '/bv', version, '/d', bundleStaging, '/p', bundle], { stdio: 'inherit' })
