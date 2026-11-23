@@ -38,6 +38,20 @@ jobs:
         run: |
           throw "Run this workflow from the main branch after completing the upstream sync."
 
+      - name: Re-apply fork policy after manual upstream sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .fork/upstream_policy.py
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore(fork): re-apply unsigned x64 sideload policy"
+            git push origin HEAD:main
+          fi
+          echo "HERMES_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Record build metadata
         id: metadata
         shell: pwsh
