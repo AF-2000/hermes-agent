@@ -1,0 +1,215 @@
+name: Build and publish Windows x64 sideload bundle
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-x64-sideload-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 900
+    env:
+      HERMES_BUILD_COMMIT: ${{ github.sha }}
+      HERMES_DESKTOP_VARIANT: bundled
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Require manual dispatch from main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        shell: pwsh
+        run: |
+          throw "Run this workflow from the main branch after completing the upstream sync."
+
+      - name: Re-apply fork policy after manual upstream sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .fork/upstream_policy.py
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore(fork): re-apply unsigned x64 sideload policy"
+            git push origin HEAD:main
+          fi
+          echo "HERMES_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Record build metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $version = python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sourceSha = (git rev-parse HEAD).Trim()
+          $tag = "sideload-win-x64-$($sourceSha.Substring(0, 12))"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "source_sha=$sourceSha" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "HERMES_PAYLOAD_VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "Build source: $sourceSha"
+          Write-Host "Version: $version"
+          Write-Host "Release tag: $tag"
+
+      - name: Set up the locked build toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          archive-inputs: false
+
+      - name: Restore desktop dependency inputs
+        id: build-cache
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: restore
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+
+      - name: Prepare the bundled desktop payload
+        id: prepare
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "desktop-job"
+          $cache = Join-Path $env:GITHUB_WORKSPACE ".cache\desktop-inputs"
+          python scripts/bundles/desktop.py --commit $env:HERMES_BUILD_COMMIT --variant bundled --prepare-only --work $work --cache $cache
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m scripts.ci.desktop_commands (Join-Path $work "prepared.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save dependency inputs before building
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: save
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+          key: ${{ steps.build-cache.outputs.cache-key }}
+
+      - name: Install locked Windows bundle tooling
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build the unsigned x64 MSIX package
+        shell: pwsh
+        timeout-minutes: 900
+        run: |
+          python scripts/bundles/desktop.py --prepared (Join-Path $env:RUNNER_TEMP "desktop-job\prepared.json") --variant bundled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assemble, split, and hash the x64-only sideload bundle
+        id: artifact
+        shell: pwsh
+        run: |
+          node scripts/stage-msixbundle.mjs --commit $env:HERMES_BUILD_COMMIT --version $env:HERMES_PAYLOAD_VERSION --variant bundled --no-upload --arch x64 --unsigned
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $bundles = @(Get-ChildItem "apps/desktop/release" -Filter "*-win.msixbundle" -File)
+          if ($bundles.Count -ne 1) {
+            throw "Expected exactly one x64 sideload .msixbundle; found $($bundles.Count)"
+          }
+          $bundle = $bundles[0]
+
+          $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          $sevenZip = if ($sevenZipCommand) { $sevenZipCommand.Source } else { $null }
+          if (-not $sevenZip) {
+            choco install 7zip --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          }
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip executable not found" }
+
+          # MSIXBundle payloads are already compressed. Store without
+          # recompression and split into GitHub-safe 1900 MiB volumes.
+          $archive = "$($bundle.FullName).7z"
+          & $sevenZip a -t7z -mx=0 -v1900m $archive $bundle.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $parts = @(Get-ChildItem "$($archive).*" -File | Sort-Object Name)
+          if ($parts.Count -lt 1) { throw "No split 7-Zip volumes were created" }
+
+          $bundleHash = (Get-FileHash -Algorithm SHA256 $bundle.FullName).Hash.ToLowerInvariant()
+          $checksums = foreach ($part in $parts) {
+            if ($part.Length -ge 2GB) {
+              throw "Split volume exceeds GitHub's 2 GiB per-asset limit: $($part.Name)"
+            }
+            $hash = (Get-FileHash -Algorithm SHA256 $part.FullName).Hash.ToLowerInvariant()
+            "$hash  $($part.Name)"
+          }
+          $checksumFile = Join-Path $bundle.DirectoryName "SHA256SUMS.txt"
+          $checksums | Set-Content -Encoding ascii $checksumFile
+
+          "bundle_sha256=$bundleHash" >> $env:GITHUB_OUTPUT
+          "part_count=$($parts.Count)" >> $env:GITHUB_OUTPUT
+          "BUNDLE_ARCHIVE=$archive" >> $env:GITHUB_ENV
+          "BUNDLE_DIR=$($bundle.DirectoryName)" >> $env:GITHUB_ENV
+          Write-Host "Unsigned bundle: $($bundle.Name)"
+          Write-Host "Bundle SHA-256: $bundleHash"
+          Write-Host "Split into $($parts.Count) volumes (1900 MiB maximum each)"
+
+      - name: Publish release assets and checksum
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          SOURCE_SHA: ${{ steps.metadata.outputs.source_sha }}
+          APP_VERSION: ${{ steps.metadata.outputs.version }}
+          BUNDLE_SHA256: ${{ steps.artifact.outputs.bundle_sha256 }}
+          PART_COUNT: ${{ steps.artifact.outputs.part_count }}
+        run: |
+          $title = "Hermes Desktop Windows x64 Sideload $env:APP_VERSION"
+          $notes = @"
+          Windows x64 Sideload MSIXBundle only. This bundle is **unsigned**.
+
+          **MSIXBundle SHA-256:** $env:BUNDLE_SHA256
+
+          Download every .7z.001, .7z.002, ... volume and SHA256SUMS.txt.
+          Verify the downloaded volumes with SHA256SUMS.txt, then extract by opening the .7z.001 volume with 7-Zip.
+          Build source commit: $env:SOURCE_SHA
+          Split volumes: $env:PART_COUNT (1900 MiB max each)
+          "@
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          if (-not $releaseExists) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            # A rerun replaces only the assets attached to this exact
+            # commit-specific release; no other release or tag is touched.
+            $oldAssets = @(gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name')
+            foreach ($asset in $oldAssets) {
+              gh release delete-asset $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --yes
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+
+          $parts = @(Get-ChildItem "$($env:BUNDLE_ARCHIVE).*" -File | Sort-Object Name)
+          $checksumFile = Join-Path $env:BUNDLE_DIR "SHA256SUMS.txt"
+          $assets = @($parts | ForEach-Object { $_.FullName }) + @($checksumFile)
+          gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

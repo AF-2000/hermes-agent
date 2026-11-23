@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Native Windows adapter: bundle x64 + arm64 MSIX packages and sign the
+// Native Windows adapter: bundle the selected MSIX architecture (x64 only in this fork) and sign the
 // envelope. Every mode stops at the artifact; CI stages it for native smoke
 // before the separate release Python publisher can write an App Installer feed.
 // Usage: node scripts/stage-msixbundle.mjs --tag vX.Y.Z --candidate
@@ -18,7 +18,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 
 const { values } = parseArgs({ options: {
   tag: { type: 'string' }, commit: { type: 'string' }, version: { type: 'string' },
-  variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
+  variant: { type: 'string' }, arch: { type: 'string' }, 'no-upload': { type: 'boolean' }, unsigned: { type: 'boolean' }, candidate: { type: 'boolean' },
   'channel-request': { type: 'string' },
 } })
 const channelRequest = values['channel-request']
@@ -101,27 +101,30 @@ function bundleFile() {
   return path.join(releaseDir, `${name}-${version}-win.msixbundle`)
 }
 
-const signing = Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIGN_ACCOUNT && process.env.AZURE_SIGN_PROFILE)
+const signing = values.unsigned !== true && Boolean(process.env.AZURE_SIGN_ENDPOINT && process.env.AZURE_SIGN_ACCOUNT && process.env.AZURE_SIGN_PROFILE)
 const { makeappx, signtool, dlib, dotnetRoot } = await ensureWindowsBundleTools({ signing })
 
 // ── 1. bundle ──────────────────────────────────────────────────────────────
-const x64 = msixFile('x64')
-const arm64 = msixFile('arm64')
+const arch = values.arch || 'x64'
+if (arch !== 'x64') {
+  throw new Error('--arch must be x64 in this fork; received ' + arch)
+}
+const packages = [msixFile('x64')]
 const bundle = bundleFile()
-if (!fs.existsSync(x64) || !fs.existsSync(arm64)) {
-  console.error(`[stage-msixbundle] need both per-arch msix to bundle:\n  ${x64}\n  ${arm64}`)
+const missing = packages.filter(file => !fs.existsSync(file))
+if (missing.length) {
+  console.error(`[stage-msixbundle] missing package(s) for ${arch} bundle:\n  ${missing.join('\n  ')}`)
   process.exit(1)
 }
 
-// makeappx bundle /d includes EVERY .msix in the dir — the Store-submission
-// packages (Store-*.msix, same release dir after the legs merged their
-// artifacts) must never ride inside the out-of-store bundle. Stage only the
-// two per-arch packages into a clean dir before bundling.
+// Stage only the selected architecture packages. This prevents ARM64 or
+// Store packages from entering the fork's x64-only sideload bundle.
 const bundleStaging = path.join(releaseDir, '__bundle-staging')
 fs.rmSync(bundleStaging, { recursive: true, force: true })
 fs.mkdirSync(bundleStaging, { recursive: true })
-fs.copyFileSync(x64, path.join(bundleStaging, path.basename(x64)))
-fs.copyFileSync(arm64, path.join(bundleStaging, path.basename(arm64)))
+for (const file of packages) {
+  fs.copyFileSync(file, path.join(bundleStaging, path.basename(file)))
+}
 
 if (fs.existsSync(bundle)) fs.rmSync(bundle, { force: true })
 execFileSync(makeappx, ['bundle', '/o', '/bv', version, '/d', bundleStaging, '/p', bundle], { stdio: 'inherit' })
