@@ -25,33 +25,31 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     outputs:
-      source_sha: \${{ steps.plan.outputs.source_sha }}
-      upstream_sha: \${{ steps.plan.outputs.upstream_sha }}
-      version: \${{ steps.plan.outputs.version }}
-      tag: \${{ steps.plan.outputs.tag }}
-      needs_build: \${{ steps.plan.outputs.needs_build }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      needs_build: ${{ steps.plan.outputs.needs_build }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          token: \${{ secrets.SYNC_PAT }}
+          token: ${{ secrets.SYNC_PAT }}
 
       - name: Merge upstream and re-apply fork policy
-        env:
-          GH_TOKEN: \${{ secrets.SYNC_PAT }}
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/\${UPSTREAM_REPO}.git"
-          git fetch --prune upstream "\${UPSTREAM_BRANCH}" --tags
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --prune upstream " ${UPSTREAM_BRANCH " --tags
 
           # Prefer upstream on overlapping source hunks. The fork-owned policy
           # script then reapplies the x64-only packaging delta and removes
           # upstream release publishers before anything is pushed.
-          git merge --no-edit -X theirs "upstream/\${UPSTREAM_BRANCH}"
+          git merge --no-edit -X theirs "upstream/${UPSTREAM_BRANCH"
           python .fork/upstream_policy.py
 
           if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -64,16 +62,16 @@ jobs:
       - name: Plan the x64 release
         id: plan
         env:
-          GH_TOKEN: \${{ github.token }}
-          FORCE: \${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
         shell: bash
         run: |
           set -euo pipefail
-          upstream_sha=$(git rev-parse "upstream/\${UPSTREAM_BRANCH}")
+          upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH")
           source_sha=$(git rev-parse HEAD)
           version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           desc=$(git describe --tags --always "$upstream_sha")
-          tag="sideload-win-x64-\${upstream_sha:0:12}"
+          tag="sideload-win-x64-${{upstream_sha:0:12}"
 
           if [ "$FORCE" = "true" ]; then
             need=true
@@ -106,21 +104,21 @@ jobs:
       contents: write
       id-token: write
     env:
-      HERMES_BUILD_COMMIT: \${{ needs.sync.outputs.source_sha }}
-      HERMES_PAYLOAD_VERSION: \${{ needs.sync.outputs.version }}
+      HERMES_BUILD_COMMIT: ${{ needs.sync.outputs.source_sha }}
+      HERMES_PAYLOAD_VERSION: ${{ needs.sync.outputs.version }}
       HERMES_DESKTOP_VARIANT: bundled
-      AZURE_SIGN_ENDPOINT: \${{ vars.AZURE_SIGN_ENDPOINT }}
-      AZURE_SIGN_ACCOUNT: \${{ vars.AZURE_SIGN_ACCOUNT }}
-      AZURE_SIGN_PROFILE: \${{ vars.AZURE_SIGN_PROFILE }}
-      AZURE_SIGN_PUBLISHER: \${{ vars.AZURE_SIGN_PUBLISHER }}
-      AZURE_CLIENT_ID: \${{ vars.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: \${{ vars.AZURE_TENANT_ID }}
+      AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+      AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+      AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
+      AZURE_SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_TOKEN_CREDENTIALS: prod
-      GH_TOKEN: \${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: \${{ needs.sync.outputs.source_sha }}
+          ref: ${{ needs.sync.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -146,8 +144,8 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
         with:
-          client-id: \${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
       - name: Mint federated token for the signing dlib
@@ -217,10 +215,10 @@ jobs:
       - name: Publish the single bundle asset
         shell: pwsh
         env:
-          RELEASE_TAG: \${{ needs.sync.outputs.tag }}
-          SOURCE_SHA: \${{ needs.sync.outputs.source_sha }}
-          UPSTREAM_SHA: \${{ needs.sync.outputs.upstream_sha }}
-          APP_VERSION: \${{ needs.sync.outputs.version }}
+          RELEASE_TAG: ${{ needs.sync.outputs.tag }}
+          SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+          APP_VERSION: ${{ needs.sync.outputs.version }}
         run: |
           $title = "Hermes Desktop Windows x64 Sideload $env:APP_VERSION"
           $notes = @"
